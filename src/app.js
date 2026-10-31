@@ -1,9 +1,10 @@
-import { FEATURE_DEFINITIONS, GROUP_DEFINITIONS, extractGeometry, aggregateComparisons, summarizeQuality } from './geometry.js';
+import { FEATURE_DEFINITIONS, GROUP_DEFINITIONS, aggregateComparisons } from './geometry.js';
 import { comparisonDiagnostics } from './diagnostics.js';
 import { isSupportedImage, loadPhoto } from './media.js';
 import { analyzeLipReliability, LIP_SIGNAL_DEFINITIONS } from './expression.js';
 import { aggregateAdjusted, withinGroupAdjusted, summarizeLipReference } from './adjustment.js';
 import { buildExportRows, serializeCsv } from './export.js';
+import { prepareLandmarkChoices, applyLandmarkChoice } from './landmarks.js';
 
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const MAX_PHOTOS = 8;
@@ -12,7 +13,7 @@ const MAX_PIXELS = 32_000_000;
 const state = {
   photos: { a: [], b: [] }, selected: { a: 0, b: 0 },
   overlay: 'contours', metric: FEATURE_DEFINITIONS[0].id, pointLabels: false,
-  connections: { mesh: [], contours: [] }, results: null, adjusted: null,
+  connections: { mesh: [], contours: [], faceOval: [] }, results: null, adjusted: null,
   busy: false, importing: false, ready: false, faceZoom: true,
 };
 let worker;
@@ -25,6 +26,7 @@ const current = (side) => state.photos[side][state.selected[side]];
 const isLocked = () => state.busy || state.importing;
 const modeLabel = (mode) => ({ auto: '自动', include: '手动保留', exclude: '手动排除' }[mode] ?? '自动');
 const reliability = (photo) => photo.lip?.reliability ?? 0;
+const hasPoseWarning = (photo) => photo?.quality?.warnings.some((warning) => warning.code === 'pose');
 
 function showError(message = '') {
   $('#global-error').textContent = message;
@@ -52,7 +54,7 @@ function updateControls() {
   $('#clear-all').disabled = isLocked() || (!state.photos.a.length && !state.photos.b.length);
   $('#load-model').disabled = isLocked() || state.ready;
   $('#load-model').textContent = state.ready ? '已加载' : '预先加载';
-  document.querySelectorAll('.add-photo,.remove-photo,.upload-empty,input[type="file"],.lip-mode').forEach((button) => { button.disabled = isLocked(); });
+  document.querySelectorAll('.add-photo,.remove-photo,.upload-empty,input[type="file"],.lip-mode,.landmark-mode').forEach((button) => { button.disabled = isLocked(); });
 }
 
 async function addPhotos(side, files) {
@@ -125,7 +127,7 @@ function renderPanels() {
       <div class="photo-stage ${photo ? 'has-photo' : ''}">
         ${photo ? `<img class="source-photo" alt="${label(side, state.selected[side])} 的照片"><canvas aria-label="人物 ${side.toUpperCase()} 的关键点图层"></canvas><span class="photo-caption">${label(side, state.selected[side])} · ${photo.width} × ${photo.height}</span><span class="photo-status"></span>` : `<button class="upload-empty" aria-label="选择人物 ${side.toUpperCase()} 的照片"><div class="upload-glyph" aria-hidden="true"><span></span></div><strong>选择照片，或拖放到这里</strong><span class="small">一张起步，多张更完整</span><span class="format-hint">JPG / PNG / WEBP / HEIF · ≤ 12 MB</span></button>`}
       </div>
-      <div class="thumbnail-row"></div><p class="color-note small muted" hidden></p><p class="crop-note small muted" hidden></p><ul class="quality-list"></ul><div class="lip-assessment" hidden></div><p class="photo-error" hidden></p>`;
+      <div class="thumbnail-row"></div><p class="color-note small muted" hidden></p><p class="crop-note small muted" hidden></p><ul class="quality-list"></ul><div class="orientation-assessment" hidden></div><div class="lip-assessment" hidden></div><p class="photo-error" hidden></p>`;
     const input = $('input[type="file"]', panel);
     input.addEventListener('change', () => addPhotos(side, input.files));
     $('.upload-empty', panel)?.addEventListener('click', () => input.click());
@@ -170,7 +172,8 @@ function renderPanels() {
       }
       if (photo.detectionInfo) {
         const info = photo.detectionInfo;
-        $('.crop-note', panel).textContent = `${info.method.includes('tile') ? '分区搜索后定位' : '整图定位'} · 原图脸部宽约 ${number(info.sourceFaceWidthPx, 0)} px · 裁剪复测，原文件未修改。`;
+        const method = info.method.includes('upright') ? '旋正裁剪复测' : info.method.includes('refined') ? '裁剪复测' : '定位';
+        $('.crop-note', panel).textContent = `${info.method.includes('tile') ? '分区搜索后' : '整图搜索后'}${method} · 原图脸部宽约 ${number(info.sourceFaceWidthPx, 0)} px · 原文件未修改。`;
         $('.crop-note', panel).hidden = false;
       }
       const badge = $('.photo-status', panel);
@@ -186,12 +189,68 @@ function renderPanels() {
         $('.photo-error', panel).hidden = false;
         $('.photo-error', panel).textContent = photo.error;
       }
+      if (photo.result) renderOrientationAssessment($('.orientation-assessment', panel), photo, label(side, state.selected[side]));
       if (photo.result && photo.lip) renderLipAssessment($('.lip-assessment', panel), photo, label(side, state.selected[side]));
     }
     container.append(panel);
   }
   drawAll();
   updateControls();
+}
+
+function renderOrientationAssessment(container, photo, photoLabel) {
+  const info = photo.orientationInfo;
+  if (!info) return;
+  container.hidden = false;
+  const title = document.createElement('strong');
+  title.textContent = '倾斜定位检查';
+  const description = document.createElement('p');
+  description.className = 'small';
+  const reasons = {
+    'not-needed': '倾斜未达到复测阈值，沿用原始定位。',
+    stable: '两次定位通过一致性检查，默认采用旋正复测。',
+    'contour-disagreement': '两次轮廓差异较大，默认保留原始定位；请对照照片手动选择。',
+    'anchor-disagreement': '两次眼鼻嘴位置差异较大，已保留原始定位。',
+    'no-face': '旋正后未检测到脸，已保留原始定位。',
+    'invalid-geometry': '无法可靠计算倾斜，已保留原始定位。',
+    'invalid-refinement': '旋正关键点未形成有效比例，已保留原始定位。',
+    failed: '旋正复测未完成，已保留原始定位。',
+  };
+  description.textContent = `眼线倾斜 ${number(info.eyeLineRollDegrees)}°。${reasons[info.reason] ?? '请检查关键点是否贴合。'}当前：${photo.landmarkMode === 'upright' ? '旋正复测' : '原始定位'}。一致不代表更准确。`;
+  const note = document.createElement('p');
+  note.className = 'small muted';
+  note.textContent = hasPoseWarning(photo)
+    ? '橙色虚线表示侧脸提示下的整圈估计轮廓，不是逐点置信度或真实可见边缘；被遮挡的一侧仍由模型推测。旋正只处理画面内倾斜。'
+    : '旋正只处理画面内倾斜，不还原侧转、仰俯或遮挡。轮廓连线来自固定面部网格，不是图像分割边缘。';
+  container.replaceChildren(title, description);
+  if (photo.landmarkChoices?.original && photo.landmarkChoices?.upright) {
+    const control = document.createElement('label');
+    control.className = 'lip-control small';
+    control.append(document.createTextNode('本张关键点 '));
+    const select = document.createElement('select');
+    select.className = 'landmark-mode';
+    select.setAttribute('aria-label', `${photoLabel} 的关键点定位`);
+    for (const [value, text] of [['original', '原始定位'], ['upright', '旋正复测']]) {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = text; select.append(option);
+    }
+    select.value = photo.landmarkMode;
+    select.addEventListener('change', () => {
+      if (isLocked() || !applyLandmarkChoice(photo, select.value)) return;
+      if (state.results) state.results = aggregateComparisons(state.photos.a.map((p) => p.result), state.photos.b.map((p) => p.result));
+      renderPanels();
+      if (state.results) renderResults();
+      $('#progress').textContent = `${photoLabel} 已切换关键点；两类分数、动作信号和测量线均已更新。`;
+    });
+    control.append(select); container.append(control);
+  }
+  if (info.agreement?.comparable) {
+    const agreement = document.createElement('p');
+    agreement.className = 'small muted';
+    agreement.textContent = `轮廓平均位移为眼间距的 ${number(info.agreement.contourMeanFraction * 100)}%，最大 ${number(info.agreement.contourMaxFraction * 100)}%。这是两次定位的差异，不是定位误差。`;
+    container.append(agreement);
+  }
+  container.append(note);
 }
 
 function renderLipAssessment(container, photo, photoLabel) {
@@ -262,6 +321,20 @@ function drawConnections(ctx, points, connections, map, color, lineWidth = 1) {
   ctx.stroke();
 }
 
+function drawFaceContours(ctx, photo, points, map, color, lineWidth) {
+  const edgeKey = ({ start, end }) => `${Math.min(start, end)}:${Math.max(start, end)}`;
+  const oval = state.connections.faceOval ?? [];
+  const ovalKeys = new Set(oval.map(edgeKey));
+  drawConnections(ctx, points, state.connections.contours.filter((edge) => !ovalKeys.has(edgeKey(edge))), map, color, lineWidth);
+  ctx.save();
+  if (hasPoseWarning(photo)) {
+    ctx.setLineDash([5, 4]);
+    drawConnections(ctx, points, oval, map, '#31291dcc', lineWidth + 2);
+  }
+  drawConnections(ctx, points, oval, map, hasPoseWarning(photo) ? '#ffbe73' : color, lineWidth);
+  ctx.restore();
+}
+
 function drawPhoto(side) {
   const photo = current(side);
   const panel = $(`.photo-panel[data-side="${side}"]`);
@@ -291,8 +364,12 @@ function drawPhoto(side) {
   const points = photo.landmarks;
   const map = (point) => ({ x: x + point.x * w, y: y + point.y * h });
   const color = side === 'a' ? '#cbf3ad' : '#ffe0b1';
-  if (state.overlay === 'mesh') drawConnections(ctx, points, state.connections.mesh, map, side === 'a' ? '#c9efad88' : '#ffdfad88', .55);
-  if (state.overlay !== 'measure') drawConnections(ctx, points, state.connections.contours, map, color, 1.1);
+  if (state.overlay === 'mesh') {
+    const oval = new Set((state.connections.faceOval ?? []).map(({ start, end }) => `${Math.min(start, end)}:${Math.max(start, end)}`));
+    const mesh = hasPoseWarning(photo) ? state.connections.mesh.filter(({ start, end }) => !oval.has(`${Math.min(start, end)}:${Math.max(start, end)}`)) : state.connections.mesh;
+    drawConnections(ctx, points, mesh, map, side === 'a' ? '#c9efad88' : '#ffdfad88', .55);
+  }
+  if (state.overlay !== 'measure') drawFaceContours(ctx, photo, points, map, color, 1.1);
   let visiblePoints = [];
   if (state.overlay === 'measure') {
     const feature = FEATURE_DEFINITIONS.find((item) => item.id === state.metric);
@@ -339,7 +416,7 @@ function drawAligned() {
   const scale = Math.min((canvas.width - 90) / (maxX - minX), (canvas.height - 65) / (maxY - minY));
   const map = (p) => ({ x: canvas.width / 2 + (p.x - (minX + maxX) / 2) * scale, y: canvas.height / 2 + (p.y - (minY + maxY) / 2) * scale });
   photos.forEach((photo, index) => {
-    if (photo?.result) drawConnections(ctx, photo.result.normalizedLandmarks, state.connections.contours, map, index ? '#bf7856cc' : '#456b58cc', 1.6);
+    if (photo?.result) drawFaceContours(ctx, photo, photo.result.normalizedLandmarks, map, index ? '#bf7856cc' : '#456b58cc', 1.6);
   });
 }
 
@@ -419,15 +496,15 @@ async function analyze() {
             const faces = response.faceLandmarks;
             if (!faces.length) throw new Error('整图与分区搜索均未检测到人脸。请手动裁剪到脸部后重试；如果原图脸部像素过少，放大也无法补回细节。');
             if (faces.length !== 1) throw new Error('检测到多张脸。请裁剪到一人后重新加入；此照片未参与评分。');
-            const geometry = extractGeometry(faces[0], width, height);
-            if (!geometry.valid) throw new Error('关键点未形成完整有效的比例，请换一张照片。');
-            photo.landmarks = faces[0];
-            photo.cropRegion = response.cropRegions?.[0];
-            photo.detectionInfo = response.detectionInfo;
-            photo.result = geometry;
-            photo.blendshapes = response.faceBlendshapes[0]?.categories ?? [];
-            photo.quality = summarizeQuality(faces[0], width, height, photo.blendshapes);
-            photo.lip = analyzeLipReliability(photo.blendshapes, photo.quality, photo.lipMode);
+            photo.orientationInfo = response.orientationInfo;
+            photo.landmarkChoices = prepareLandmarkChoices(response, width, height);
+            if (photo.orientationInfo?.available && !photo.landmarkChoices.upright) {
+              photo.orientationInfo = { ...photo.orientationInfo, available: false, recommended: false, reason: 'invalid-refinement' };
+            }
+            const preferred = response.selectedLandmarkVariant ?? 'original';
+            if (!applyLandmarkChoice(photo, preferred) && !applyLandmarkChoice(photo, 'original')) {
+              throw new Error('关键点未形成完整有效的比例，请换一张照片。');
+            }
           } catch (error) {
             photo.error = error.message;
             if (!state.ready) throw error;

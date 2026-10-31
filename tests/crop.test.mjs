@@ -3,11 +3,18 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as cropHelpers from '../src/crop.js';
+import * as orientationHelpers from '../src/orientation.js';
 import { FULL_REGION, regionToPixels, planTiles, mapLandmarks, faceBounds, paddedFaceCrop, sameFaceDetection, deduplicateFaces, reconcileSoleFaceRefinement } from '../src/crop.js';
 
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
 // Software fixture for coordinate transforms/deduplication, not detector claims.
-const face = (x = 0.3, y = 0.3, size = 0.1, samplingScale = 1) => ({ landmarks: Array.from({ length: 478 }, (_, index) => ({ x: x + (index % 2) * size, y: y + (Math.floor(index / 2) % 2) * size * 1.2, z: -0.02 })), blendshapes: { categories: [] }, region: FULL_REGION, samplingScale });
+const face = (x = 0.3, y = 0.3, size = 0.1, samplingScale = 1) => {
+  const landmarks = Array.from({ length: 478 }, (_, index) => ({ x: x + (index % 2) * size, y: y + (Math.floor(index / 2) % 2) * size * 1.2, z: -0.02 }));
+  // Horizontal outer-eye anchors keep old crop-only fixtures free of tilt.
+  landmarks[33] = { x: x + size * 0.2, y: y + size * 0.3, z: -0.02 };
+  landmarks[263] = { x: x + size * 0.8, y: y + size * 0.3, z: -0.02 };
+  return { landmarks, blendshapes: { categories: [] }, region: FULL_REGION, samplingScale };
+};
 
 test('crop landmarks map to source normalized coordinates and width-scaled z', () => {
   const result = mapLandmarks([{ x: 0.25, y: 0.75, z: -0.2 }], { x: 0.1, y: 0.2, width: 0.4, height: 0.3 })[0];
@@ -73,16 +80,45 @@ test('distinct people are preserved; absence and invalid meshes yield no detecti
 
 // Exercise actual worker orchestration with a deterministic detector stub. No
 // image files/model or face-detection accuracy assertions are involved.
-async function workerHarness(faces, missFull = false, refinementFaces = null) {
+async function workerHarness(faces, missFull = false, refinementFaces = null, options = {}) {
   const source = await readFile(new URL('../src/inference.worker.js', import.meta.url), 'utf8');
   const sourceWidth = 1000;
   const sourceHeight = 600;
   class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() { return { drawImage: (_bitmap, x, y, width, height) => { this.region = { x: x / sourceWidth, y: y / sourceHeight, width: width / sourceWidth, height: height / sourceHeight }; } }; }
+    constructor(width, height) {
+      this.width = width; this.height = height;
+      this.initialWidth = width; this.initialHeight = height;
+      options.canvases?.push(this);
+    }
+    getContext() { return {
+      fillRect: (...args) => { this.fill = args; },
+      setTransform: (a, b, c, d, e, f) => { this.transform = { a, b, c, d, e, f }; },
+      drawImage: (bitmap, x, y, width, height) => {
+        this.bitmap = bitmap;
+        if (!this.transform) this.region = { x: x / sourceWidth, y: y / sourceHeight, width: width / sourceWidth, height: height / sourceHeight };
+      },
+    }; }
+
   }
   let detectorCalls = 0;
   const detector = { detect(canvas) {
+    if (canvas.transform) {
+      detectorCalls += 1;
+      if (options.uprightError) throw new Error('optional detector error');
+      const candidates = options.uprightFaces ?? faces;
+      const { a, b, c, d, e, f } = canvas.transform;
+      const sourceSize = canvas.width / Math.hypot(a, b);
+      return {
+        faceLandmarks: candidates.map((candidate) => candidate.landmarks.map((point) => ({
+          ...point,
+          x: (a * point.x * sourceWidth + c * point.y * sourceHeight + e) / canvas.width,
+          y: (b * point.x * sourceWidth + d * point.y * sourceHeight + f) / canvas.height,
+          z: point.z * sourceWidth / sourceSize,
+        }))),
+        faceBlendshapes: candidates.map((candidate) => candidate.blendshapes),
+      };
+    }
+    if (options.originalError) throw new Error('original detector error');
     const region = canvas.region;
     const visible = refinementFaces && detectorCalls > 0 ? refinementFaces : faces;
     detectorCalls += 1;
@@ -95,8 +131,8 @@ async function workerHarness(faces, missFull = false, refinementFaces = null) {
       faceBlendshapes: matches.map((candidate) => candidate.blendshapes),
     };
   } };
-  const context = vm.createContext({ self: { location: { href: 'http://example.test/src/inference.worker.js' } }, OffscreenCanvas: Canvas, cropHelpers, detector });
-  vm.runInContext(source + '\ncrop = cropHelpers; landmarker = detector; self.runDetection = detectImage;', context);
+  const context = vm.createContext({ self: { location: { href: 'http://example.test/src/inference.worker.js' } }, OffscreenCanvas: Canvas, cropHelpers, orientationHelpers, detector });
+  vm.runInContext(source + '\ncrop = cropHelpers; orientation = orientationHelpers; landmarker = detector; self.runDetection = detectImage;', context);
   return context.self.runDetection({ width: sourceWidth, height: sourceHeight });
 }
 
@@ -184,4 +220,142 @@ test('actual worker sole-refinement branch keeps one face despite corrected outl
   assert.equal(result.detectionInfo.method, 'full-refined');
   close(result.faceLandmarks[0][10].x, refined.landmarks[10].x);
   close(result.detectionInfo.sourceFaceWidthPx, 100);
+});
+
+// These deterministic arrays exercise orchestration and affine mapping only.
+function tiltedFace(degrees = 24) {
+  const candidate = face(0.32, 0.22, 0.28);
+  const angle = degrees * Math.PI / 180;
+  candidate.landmarks = candidate.landmarks.map((point) => {
+    const x = (point.x - 0.46) * 1000;
+    const y = (point.y - 0.4) * 600;
+    return { ...point, x: 0.46 + (Math.cos(angle) * x - Math.sin(angle) * y) / 1000, y: 0.4 + (Math.sin(angle) * x + Math.cos(angle) * y) / 600 };
+  });
+  return candidate;
+}
+
+test('worker no-tilt result keeps original coordinates and exposes one variant', async () => {
+  const candidate = face(0.25, 0.2, 0.3);
+  const result = await workerHarness([candidate]);
+  assert.equal(result.selectedLandmarkVariant, 'original');
+  assert.equal(result.orientationInfo.attempted, false);
+  assert.equal(result.orientationInfo.reason, 'not-needed');
+  assert.deepEqual(Object.keys(result.landmarkVariants), ['original']);
+  assert.equal(result.landmarkVariants.original.landmarks, result.faceLandmarks[0]);
+  close(result.faceLandmarks[0][33].x, candidate.landmarks[33].x);
+});
+
+test('worker skips a padded refinement that repeats the full source image', async () => {
+  const result = await workerHarness([face(0.05, 0.05, 0.7)]);
+  assert.equal(result.detectionInfo.passes, 1);
+  assert.equal(result.detectionInfo.method, 'full');
+  assert.equal(result.orientationInfo.attempted, false);
+});
+
+test('worker accepts stable upright refinement, preserves original and maps x/y/z back', async () => {
+  const original = tiltedFace();
+  const upright = structuredClone(original);
+  upright.landmarks[1].z = -0.03;
+  upright.blendshapes = { categories: [{ categoryName: 'test-expression', score: 0.7 }] };
+  const canvases = [];
+  const result = await workerHarness([original], false, null, { uprightFaces: [upright], canvases });
+  assert.equal(result.selectedLandmarkVariant, 'upright');
+  assert.equal(result.orientationInfo.attempted, true);
+  assert.equal(result.orientationInfo.available, true);
+  assert.equal(result.orientationInfo.recommended, true);
+  close(result.orientationInfo.eyeLineRollDegrees, 24);
+  assert.equal(result.detectionInfo.method, 'full-refined-upright');
+  assert.equal(result.detectionInfo.passes, 3);
+  assert.equal(result.landmarkVariants.original.detectionInfo.method, 'full-refined');
+  assert.equal(result.landmarkVariants.original.detectionInfo.passes, 3);
+  assert.equal(result.landmarkVariants.upright.landmarks, result.faceLandmarks[0]);
+  close(result.faceLandmarks[0][1].x, upright.landmarks[1].x);
+  close(result.faceLandmarks[0][1].y, upright.landmarks[1].y);
+  close(result.faceLandmarks[0][1].z, -0.03);
+  assert.equal(result.faceBlendshapes[0].categories[0].categoryName, 'test-expression');
+  close(result.detectionInfo.sourceFaceWidthPx, faceBounds(upright.landmarks).width * 1000);
+  const canvas = canvases.find((item) => item.transform);
+  assert.ok(canvas.initialWidth <= 1600 && canvas.initialHeight <= 1600);
+  assert.deepEqual(canvas.fill, [0, 0, canvas.initialWidth, canvas.initialHeight]);
+  assert.equal(canvas.width, 1);
+  assert.equal(canvas.height, 1);
+  assert.ok(canvases.every((item) => item.bitmap === canvas.bitmap), 'all passes sample the same original bitmap');
+});
+
+test('worker refuses upright alternative when stable anchors disagree', async () => {
+  const original = tiltedFace();
+  const shifted = structuredClone(original);
+  shifted.landmarks.forEach((point) => { point.x += 0.15; });
+  const result = await workerHarness([original], false, null, { uprightFaces: [shifted] });
+  assert.equal(result.selectedLandmarkVariant, 'original');
+  assert.equal(result.orientationInfo.reason, 'anchor-disagreement');
+  assert.equal(result.orientationInfo.available, false);
+  assert.equal(result.landmarkVariants.upright, undefined);
+  close(result.faceLandmarks[0][1].x, original.landmarks[1].x);
+});
+
+test('worker retains original default but exposes comparable contour-disagreement alternative', async () => {
+  const original = tiltedFace();
+  const changed = structuredClone(original);
+  for (const index of orientationHelpers.FACE_OVAL_INDICES) changed.landmarks[index].x += 0.08;
+  const result = await workerHarness([original], false, null, { uprightFaces: [changed] });
+  assert.equal(result.selectedLandmarkVariant, 'original');
+  assert.equal(result.orientationInfo.reason, 'contour-disagreement');
+  assert.equal(result.orientationInfo.available, true);
+  assert.equal(result.orientationInfo.recommended, false);
+  assert.ok(result.landmarkVariants.upright);
+  close(result.faceLandmarks[0][10].x, original.landmarks[10].x);
+  close(result.landmarkVariants.upright.landmarks[10].x, changed.landmarks[10].x);
+});
+
+test('worker optional upright absence and detector exception retain original mesh', async () => {
+  const original = tiltedFace();
+  for (const [options, reason] of [[{ uprightFaces: [] }, 'no-face'], [{ uprightError: true }, 'failed']]) {
+    const canvases = [];
+    const result = await workerHarness([original], false, null, { ...options, canvases });
+    assert.equal(result.selectedLandmarkVariant, 'original');
+    assert.equal(result.orientationInfo.reason, reason);
+    assert.equal(result.orientationInfo.available, false);
+    assert.equal(result.detectionInfo.passes, 3);
+    assert.equal(result.landmarkVariants.upright, undefined);
+    close(result.faceLandmarks[0][1].x, original.landmarks[1].x);
+    const canvas = canvases.find((item) => item.transform);
+    assert.equal(canvas.width, 1);
+    assert.equal(canvas.height, 1);
+  }
+});
+
+test('worker preserves multiple upright detections for exclusion by the existing app flow', async () => {
+  const original = tiltedFace();
+  const second = structuredClone(original);
+  second.landmarks.forEach((point) => { point.x += 0.2; });
+  const result = await workerHarness([original], false, null, { uprightFaces: [original, second] });
+  assert.ok(result.faceLandmarks.length >= 2);
+  assert.equal(result.cropRegions.length, result.faceLandmarks.length);
+  assert.equal(result.orientationInfo.reason, 'multiple-faces');
+  assert.equal(result.orientationInfo.available, false);
+  assert.equal(result.landmarkVariants, undefined);
+  assert.equal(result.selectedLandmarkVariant, undefined);
+  assert.equal(result.detectionInfo.sourceFaceWidthPx, null);
+});
+
+test('worker upright pass keeps worst-case discovery work bounded to sixteen passes', async () => {
+  const original = tiltedFace();
+  original.landmarks = original.landmarks.map((point) => ({ ...point, x: 0.4 + (point.x - 0.46) / 4, y: 0.4 + (point.y - 0.4) / 4, z: point.z / 4 }));
+  const result = await workerHarness([original], true);
+  assert.equal(result.detectionInfo.passes, 16);
+  assert.equal(result.selectedLandmarkVariant, 'upright');
+});
+
+
+test('worker preserves original inference failures rather than treating them as optional refinement failures', async () => {
+  await assert.rejects(workerHarness([face()], false, null, { originalError: true }), /original detector error/);
+});
+
+test('worker threshold uses eye tilt in degrees and skips subthreshold tilt', async () => {
+  const result = await workerHarness([tiltedFace(11)]);
+  assert.equal(result.orientationInfo.attempted, false);
+  assert.equal(result.orientationInfo.reason, 'not-needed');
+  close(result.orientationInfo.eyeLineRollDegrees, 11);
+  assert.equal(result.detectionInfo.passes, 2);
 });

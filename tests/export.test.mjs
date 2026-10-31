@@ -85,3 +85,28 @@ test('unknown expression/quality data exports safely while preserving valid geom
   assert.ok(diagnostic.note.includes('known=false'));
   assert.ok(!serializeCsv(data.rows).includes('NaN'));
 });
+
+test('CSV retains both landmark passes and applies the current lip override to variant evidence', () => {
+  const a = photo(0.2, 'exclude');
+  a.lipMode = 'exclude';
+  a.landmarkMode = 'upright';
+  a.orientationInfo = { attempted: true, reason: 'stable', eyeLineRollDegrees: 28 };
+  a.landmarkChoices = {
+    original: { result: geometry(0.3), quality, blendshapes },
+    upright: { result: a.result, quality, blendshapes },
+  };
+  const data = exported({ a: [a], b: [photo(0.4)] });
+  const selection = data.records.find((row) => row.record_type === 'landmark_selection');
+  assert.equal(selection.feature, 'upright');
+  assert.equal(JSON.parse(selection.note).eyeLineRollDegrees, 28);
+  const variants = data.records.filter((row) => row.record_type === 'landmark_variant_feature');
+  assert.equal(variants.length, 26);
+  assert.equal(variants.find((row) => row.group === 'original' && row.feature === 'lipThickness').value_a, 0.3);
+  assert.equal(variants.find((row) => row.group === 'upright' && row.feature === 'lipThickness').value_a, 0.2);
+  for (const row of data.records.filter((row) => row.record_type === 'landmark_variant_reliability')) {
+    assert.equal(row.feature, 'exclude'); assert.equal(row.value_a, 1); assert.equal(row.reliability, 0);
+  }
+  assert.ok(data.rows.every((row) => row.length === 15));
+  assert.ok(data.records.some((row) => row.feature === 'orientation_policy'));
+  assert.ok(!serializeCsv(data.rows).includes('PRIVATE_'));
+});

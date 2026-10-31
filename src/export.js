@@ -1,7 +1,8 @@
 /** CSV audit data: anonymous photo labels, original measurements, and adjustments. */
 import { FEATURE_DEFINITIONS } from './geometry.js';
 import { comparisonDiagnostics } from './diagnostics.js';
-import { EXPRESSION_POLICY } from './expression.js';
+import { EXPRESSION_POLICY, analyzeLipReliability } from './expression.js';
+import { ORIENTATION_POLICY } from './orientation.js';
 import { withinGroupAdjusted, summarizeLipReference, LIP_REFERENCE_MIN_RELIABILITY } from './adjustment.js';
 
 const label = (side, index) => `${side.toUpperCase()}${index + 1}`;
@@ -17,6 +18,8 @@ export function buildExportRows(photos, baseline, adjusted) {
   const diagnostics = comparisonDiagnostics(geometries.a, geometries.b, baseline);
   add(['metadata', '', '', '', 'method', '', '', '', '', 'FaceTwin; MediaPipe Tasks Vision 0.10.21; face_landmarker float16/1; geometry only; scale=0.20; floor=0.01; original 5 equal-weight groups; uncalibrated']);
   add(['metadata', '', '', '', 'expression_policy', '', '', '', '', JSON.stringify(EXPRESSION_POLICY)]);
+  add(['metadata', '', '', '', 'orientation_policy', '', '', '', '', JSON.stringify(ORIENTATION_POLICY)]);
+  add(['metadata', '', '', '', 'landmark_method', '', '', '', '', 'Original score means unweighted by lip reliability, using the selected landmark pass. Upright is 2D rotation only; agreement is consistency, not accuracy. Variant records retain both passes; no hidden-contour reconstruction.']);
   add(['metadata', '', '', '', 'adjustment_method', '', '', '', '', 'Only lipThickness base weight is multiplied by min(qA,qB); normalize all retained weights globally. Missing reliability=0. No change to raw measurements. Coefficients and q are not probabilities.']);
   add(['summary', '', '', '', 'median_weighted_difference', '', '', diagnostics.medianDifference, '', 'Original weighted geometric difference']);
   for (const key of ['median', 'min', 'max', 'q1', 'q3', 'iqr']) {
@@ -52,6 +55,27 @@ export function buildExportRows(photos, baseline, adjusted) {
     const warnings = Array.isArray(photo.quality?.warnings) ? photo.quality.warnings : [];
     add(['photo_status', a, b, '', '', '', '', '', '', photo.error || warnings.map((warning) => warning?.message).filter(Boolean).join(' | ') || 'Measured']);
     add(['preprocessing', a, b, '', 'decode_and_crop', photo.width, photo.height, '', '', `${photo.decodeMethod}; ${photo.colorNote ?? ''}; ${JSON.stringify(photo.detectionInfo ?? {})}; crop=${JSON.stringify(photo.cropRegion ?? null)}`]);
+    if (photo.orientationInfo) {
+      add(['landmark_selection', a, b, '', photo.landmarkMode ?? 'original', '', '', '', '', JSON.stringify(photo.orientationInfo)]);
+    }
+    for (const mode of ['original', 'upright']) {
+      const variant = photo.landmarkChoices?.[mode];
+      if (!variant?.result?.valid) continue;
+      add(['landmark_variant_preprocessing', a, b, mode, 'crop', '', '', '', '', JSON.stringify({ ...variant.detectionInfo, cropRegion: variant.cropRegion })]);
+      for (const feature of FEATURE_DEFINITIONS) {
+        add(['landmark_variant_feature', a, b, mode, feature.id, variant.result.metrics[feature.id], '', '', '', feature.formula]);
+      }
+      for (const [key, value] of Object.entries(variant.quality?.measurements ?? {})) {
+        add(['landmark_variant_quality', a, b, mode, key, Number.isFinite(value) ? value : '', '', '', '', 'Uncalibrated image/pose proxy']);
+      }
+      for (const category of variant.blendshapes ?? []) {
+        const name = category?.categoryName ?? category?.displayName;
+        if (typeof name !== 'string' || !/^[A-Za-z_]\w*$/.test(name)) continue;
+        add(['landmark_variant_blendshape', a, b, mode, name, Number.isFinite(category.score) ? category.score : '', '', '', '', 'Raw model coefficient; not probability']);
+      }
+      const lip = analyzeLipReliability(variant.blendshapes, variant.quality, photo.lipMode);
+      add(['landmark_variant_reliability', a, b, mode, lip.mode, lip.autoReliability, lip.reliability, '', '', 'Computed with current manual override', '', '', '', '', lip.reliability]);
+    }
     if (photo.lip) {
       const lip = photo.lip;
       add(['lip_reliability', a, b, 'mouth', lip.mode, lip.autoReliability, lip.reliability, '', '', `known=${lip.known}; level=${lip.level}; suspectedPress=${lip.suspectedPress}; ${lip.reasons.map((reason) => `${reason.code}: ${reason.message}`).join(' | ')}`, '', '', '', '', lip.reliability]);

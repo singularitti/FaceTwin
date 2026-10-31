@@ -1620,3 +1620,16 @@ http-client.private.env.json
 !.zed/settings.json
 !.zed/tasks.json
 !.zed/debug.json
+
+# FaceTwin: downloaded assets and local Python environment
+/vendor/
+/models/
+/.venv/
+/.qa/
+# Preserve application scripts and uv metadata despite broad global ignores.
+!/scripts/
+!/scripts/*.py
+!/pyproject.toml
+# Keep the locally generated Python lockfile out of version control.
+/uv.lock
+!/.python-version

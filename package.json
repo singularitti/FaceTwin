@@ -1,0 +1,12 @@
+{
+  "name": "facetwin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local, explainable multi-image facial geometry comparison",
+  "scripts": {
+    "start": "uv run python scripts/serve.py",
+    "setup": "uv run python scripts/setup_assets.py",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

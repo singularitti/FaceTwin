@@ -1,0 +1,10 @@
+[project]
+name = "facetwin"
+version = "0.1.0"
+description = "Local facial geometry explorer with browser-based inference"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false

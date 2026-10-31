@@ -1624,6 +1624,7 @@ http-client.private.env.json
 # FaceTwin: downloaded assets and local Python environment
 /vendor/
 /models/
+/runs/
 /.venv/
 /.qa/
 # Preserve application scripts and uv metadata despite broad global ignores.

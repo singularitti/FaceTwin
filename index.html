@@ -14,7 +14,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="./" aria-label="FaceTwin 首页"><span class="brand-mark">ft</span> FaceTwin<span class="version">LAB / 0.1</span></a>
-    <div class="header-right"><span class="privacy"><span class="live-dot"></span>照片仅留在此浏览器</span><a href="#how-it-works">方法与边界 <span aria-hidden="true">↗</span></a></div>
+    <div class="header-right"><span class="privacy"><span class="live-dot"></span>照片仅在本机处理</span><a href="#how-it-works">方法与边界 <span aria-hidden="true">↗</span></a></div>
   </header>
   <main>
     <section class="intro">
@@ -29,6 +29,7 @@
         <div class="overlay-controls" role="group" aria-label="人脸叠加图层"><span class="toolbar-label">图层</span><button data-overlay="none" aria-pressed="false">原图</button><button data-overlay="contours" aria-pressed="true">轮廓</button><button data-overlay="mesh" aria-pressed="false">Mesh 网格</button><button data-overlay="measure" aria-pressed="false">测量线</button></div>
         <label class="metric-picker" hidden>测量 <select id="metric-select" aria-label="选择要在照片上显示的测量"></select></label>
         <label class="point-label"><input id="show-points" type="checkbox"> 关键点编号</label>
+        <label class="point-label"><input id="face-zoom" type="checkbox" checked> 放大人脸</label>
       </div>
       <div class="actionbar"><div><div class="model-row"><span id="model-state" class="model-status"><span class="status-dot"></span>模型按需加载</span><button id="load-model" class="text-button">预先加载</button></div><p id="progress" class="small muted" role="status" aria-live="polite">每组可放入 1–8 张照片。每张仅包含一张脸。</p></div><div class="actions"><button id="clear-all" class="text-button">清空照片</button><button id="compare" class="primary" disabled>开始比较 <span aria-hidden="true">↗</span></button></div></div>
       <div id="global-error" class="alert" role="alert" hidden></div>
@@ -39,9 +40,10 @@
     <section id="results" class="results" hidden aria-labelledby="results-title">
       <div class="section-top"><h2 id="results-title">比较结果</h2><button id="export-csv" class="secondary">导出数值 CSV <span aria-hidden="true">↓</span></button></div>
       <div class="result-grid">
-        <article class="score-card"><div class="eyebrow">GEOMETRIC RESEMBLANCE</div><h3>面部几何接近度</h3><div class="score-value"><span id="overall-score">—</span><span>/ 100</span></div><p class="score-description">全部有效照片配对的中位数</p><div id="range-stats" class="range-stats"></div><p class="score-caveat">这是可复现的几何指标，尚未用人类评价校准。它不表示“长得有多少百分比像”。</p></article>
+        <article class="score-card"><div class="eyebrow">UNCALIBRATED GEOMETRY</div><h3>面部几何接近度 · 未校准</h3><div class="score-value"><span id="overall-score">—</span><span>/ 100</span></div><p class="score-description">全部有效照片配对的中位数</p><p class="raw-difference">加权比例差异 <strong id="difference-value">—</strong></p><div id="range-stats" class="range-stats"></div><p class="score-caveat">这是可复现的几何指标，尚未用人类评价校准。它不表示“长得有多少百分比像”。</p></article>
         <article class="breakdown-card"><div class="card-heading"><h3>相似之处，逐项来看</h3><span class="small muted">五组特征等权</span></div><div id="group-bars"></div><div class="subtle-note"><span aria-hidden="true">↳</span> 点击下方测量项，在照片上查看计算依据。</div></article>
       </div>
+      <article class="surface diagnostics-surface"><div class="card-heading"><h3>为什么看起来像，分数却不高？</h3><span class="small muted">先看比例差异，再看照片波动</span></div><p id="score-explanation"></p><div id="within-groups" class="within-groups"></div><p class="small muted">组内比较只使用你提供的分组，不验证身份。如果同组照片也有较大差异，角度、表情或定位误差可能限制当前评分。它不是校准分数的依据。</p><h4>对平均加权差异贡献最大的特征</h4><ul id="top-differences"></ul><p class="small muted">贡献由全部有效配对的平均相对差异乘特征权重计算；解释的是几何公式，不是人眼判断。均值贡献与上方中位数分别汇总，不能逐项相加还原中位分数。</p></article>
       <div class="detail-grid">
         <article class="surface"><div class="card-heading"><h3>对齐后的轮廓</h3><span class="legend"><i class="a-color"></i>A <i class="b-color"></i>B</span></div><canvas id="aligned-canvas" width="680" height="520" aria-label="当前选中照片平移、旋转和缩放对齐后的关键点轮廓"></canvas><p class="small muted">显示当前选中的两张照片。去除位置、平面旋转和大小差异；侧脸透视仍会影响结果。</p></article>
         <article class="surface"><div class="card-heading"><h3>照片配对</h3><span id="pair-count" class="small muted"></span></div><div id="pair-matrix" class="matrix-scroll"></div><div id="pair-detail" class="pair-detail"></div><p class="small muted">点击一个配对，查看对应照片和特征。分数波动说明照片选择会影响结果；此范围不是统计置信区间。</p></article>
@@ -53,7 +55,7 @@
       <div class="eyebrow">UNDER THE SURFACE</div><h2>知道它在比较什么，<br>也知道分数到哪里为止。</h2>
       <div class="method-grid"><article><span class="method-index">01 / 定位</span><h3>关键点与 Mesh</h3><p>MediaPipe Face Landmarker 在照片上估计 478 个三维关键点。将点按固定拓扑连接起来，就是常见的人脸网格。本版取其中的二维位置测量比例。</p></article><article><span class="method-index">02 / 测量</span><h3>从位置到可解释特征</h3><p>先按照片宽高还原坐标，再消除位置、平面旋转和尺度差异。比较脸型、眼睛、鼻子、嘴部和五官布局；测量线显示真正用到的点。</p></article><article><span class="method-index">03 / 比较</span><h3>多图，保留变化</h3><p>A 组 N 张、B 组 M 张，计算全部 N × M 个有效配对。用中位数汇总，并保留范围和四分位距，让你看到角度、表情和拍摄条件带来的变化。</p></article></div>
       <details class="method-details"><summary>评分公式、PerFace 的启发与当前限制 <span aria-hidden="true">＋</span></summary><div class="method-detail-body"><h3>一个可检查的几何基线</h3><p id="formula-copy">每个比例的对称相对差异为 |a − b| / max((a + b) / 2, 0.01)。每组内部平均，再对五组等权平均得到 D；单对分数为 100 × exp(−D / 0.20)。0.20 是公开的工程尺度参数，并非从感知数据拟合得到。</p><p>不同特征相关，分组等权也只是设计选择。侧脸、遮挡、表情和透视会改变测量；多张照片不能自动消除这些偏差。该指标不包含皮肤纹理、发型、颜色等整体外观信息。</p><h3>PerFace 给出的方向</h3><p>PerFace 用人类对三张脸的相对相似性判断微调 512 维特征表示。这里借鉴其“感知相似性需要人类标注验证”的思路。本版使用几何特征，没有运行 PerFace 或 ArcFace，也没有训练模型。</p><p>深度模型的特征维度并不天然对应眼睛、鼻子等部位；画出关键点不能证明模型注意了哪里。本版的测量线则直接对应自己的几何计算。</p><div class="method-links"><a href="https://arxiv.org/html/2509.20281v1" target="_blank" rel="noreferrer">PerFace 论文 ↗</a><a href="https://github.com/kumanotanin/PerFace" target="_blank" rel="noreferrer">作者仓库 ↗</a><a href="https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker" target="_blank" rel="noreferrer">MediaPipe 文档 ↗</a></div></div></details>
-      <div class="privacy-note"><span aria-hidden="true">◈</span><p><strong>照片的处理发生在你的设备上。</strong>页面不上传照片、不写入浏览器持久存储，也不自动保存结果。关闭或刷新页面会清除当前会话；CSV 仅在你点击导出时下载。</p></div>
+      <div class="privacy-note"><span aria-hidden="true">◈</span><p><strong>照片的处理发生在你的设备上。</strong>一般图片由浏览器读取；HEIF 优先原生解码，必要时只发送到本机 Python 服务，在内存中生成保留 ICC 的 PNG 预览，不写入磁盘。8 位兼容预览不保证原始 HDR 外观，原文件不会改动。关键点与评分在浏览器计算；页面不将照片发送到外部服务器、不自动保存结果。CSV 仅在你点击导出时下载。</p></div>
     </section>
   </main>
   <footer><a class="brand footer-brand" href="./">FaceTwin<span class="version">EXPLORATORY / 0.1</span></a><span>让相似可见，让依据透明。</span></footer>

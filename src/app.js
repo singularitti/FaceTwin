@@ -1,15 +1,16 @@
 import { FEATURE_DEFINITIONS, GROUP_DEFINITIONS, extractGeometry, aggregateComparisons, summarizeQuality } from './geometry.js';
+import { comparisonDiagnostics } from './diagnostics.js';
+import { isSupportedImage, loadPhoto } from './media.js';
 
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const MAX_PHOTOS = 8;
 const MAX_BYTES = 12 * 1024 * 1024;
 const MAX_PIXELS = 32_000_000;
-const MAX_EDGE = 1600;
 const state = {
   photos: { a: [], b: [] }, selected: { a: 0, b: 0 },
   overlay: 'contours', metric: FEATURE_DEFINITIONS[0].id, pointLabels: false,
   connections: { mesh: [], contours: [] }, results: null,
-  busy: false, importing: false, ready: false,
+  busy: false, importing: false, ready: false, faceZoom: true,
 };
 let worker;
 let enginePromise;
@@ -59,16 +60,16 @@ async function addPhotos(side, files) {
   if (selectedFiles.length > available) errors.push(`每组最多 ${MAX_PHOTOS} 张；超出的照片未加入。`);
   try {
     for (const file of selectedFiles.slice(0, available)) {
-      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-        errors.push('有文件格式不支持。请使用 JPG、PNG 或 WebP；HEIC 请先导出为 JPEG。');
+      if (!isSupportedImage(file)) {
+        errors.push('有文件格式不支持。请使用 JPG、PNG、WebP、HEIC 或 HEIF。');
         continue;
       }
       if (file.size > MAX_BYTES) { errors.push('有照片超过 12 MB，请缩小后再试。'); continue; }
-      const url = URL.createObjectURL(file);
+      let photo;
       try {
-        const image = new Image();
-        image.src = url;
-        await image.decode();
+        $('#progress').textContent = '正在读取照片；HEIF 必要时由本机解码…';
+        photo = await loadPhoto(file);
+        const { image, url } = photo;
         const width = image.naturalWidth;
         const height = image.naturalHeight;
         if (!width || !height || width * height > MAX_PIXELS) {
@@ -76,17 +77,18 @@ async function addPhotos(side, files) {
           errors.push('有照片超过 3200 万像素或尺寸无效，请先缩小照片。');
           continue;
         }
-        state.photos[side].push({ url, image, width, height, result: null, error: '', quality: null });
+        state.photos[side].push({ ...photo, width, height, result: null, error: '', quality: null });
         invalidateResults();
-      } catch (_error) {
-        URL.revokeObjectURL(url);
-        errors.push('有照片无法解码，请重新导出为 JPG 或 PNG。');
+      } catch (error) {
+        if (photo?.url) URL.revokeObjectURL(photo.url);
+        errors.push(error.message || '有照片无法解码，请确认文件完整。');
       }
     }
   } finally {
     state.importing = false;
     renderPanels();
     updateControls();
+    $('#progress').textContent = '照片读取完毕，点击开始比较。';
     if (errors.length) showError([...new Set(errors)].join('\n'));
   }
 }
@@ -113,11 +115,11 @@ function renderPanels() {
     panel.dataset.side = side;
     panel.innerHTML = `
       <div class="panel-top"><div class="person-label"><span class="person-letter">${side.toUpperCase()}</span><span>人物 ${side.toUpperCase()}</span></div><span class="counter">${photos.length} / ${MAX_PHOTOS} 张</span></div>
-      <input class="visually-hidden" id="files-${side}" type="file" accept="image/jpeg,image/png,image/webp" multiple aria-label="为人物 ${side.toUpperCase()} 选择照片">
+      <input class="visually-hidden" id="files-${side}" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif,.hif" multiple aria-label="为人物 ${side.toUpperCase()} 选择照片">
       <div class="photo-stage ${photo ? 'has-photo' : ''}">
-        ${photo ? `<canvas aria-label="人物 ${side.toUpperCase()} 的照片与关键点"></canvas><span class="photo-caption">${label(side, state.selected[side])} · ${photo.width} × ${photo.height}</span><span class="photo-status"></span>` : `<button class="upload-empty" aria-label="选择人物 ${side.toUpperCase()} 的照片"><div class="upload-glyph" aria-hidden="true"><span></span></div><strong>选择照片，或拖放到这里</strong><span class="small">一张起步，多张更完整</span><span class="format-hint">JPG / PNG / WEBP · ≤ 12 MB</span></button>`}
+        ${photo ? `<img class="source-photo" alt="${label(side, state.selected[side])} 的照片"><canvas aria-label="人物 ${side.toUpperCase()} 的关键点图层"></canvas><span class="photo-caption">${label(side, state.selected[side])} · ${photo.width} × ${photo.height}</span><span class="photo-status"></span>` : `<button class="upload-empty" aria-label="选择人物 ${side.toUpperCase()} 的照片"><div class="upload-glyph" aria-hidden="true"><span></span></div><strong>选择照片，或拖放到这里</strong><span class="small">一张起步，多张更完整</span><span class="format-hint">JPG / PNG / WEBP / HEIF · ≤ 12 MB</span></button>`}
       </div>
-      <div class="thumbnail-row"></div><ul class="quality-list"></ul><p class="photo-error" hidden></p>`;
+      <div class="thumbnail-row"></div><p class="color-note small muted" hidden></p><p class="crop-note small muted" hidden></p><ul class="quality-list"></ul><p class="photo-error" hidden></p>`;
     const input = $('input[type="file"]', panel);
     input.addEventListener('change', () => addPhotos(side, input.files));
     $('.upload-empty', panel)?.addEventListener('click', () => input.click());
@@ -155,6 +157,16 @@ function renderPanels() {
       row.append(add);
     }
     if (photo) {
+      $('.source-photo', panel).src = photo.url;
+      if (photo.colorNote) {
+        $('.color-note', panel).textContent = photo.colorNote;
+        $('.color-note', panel).hidden = false;
+      }
+      if (photo.detectionInfo) {
+        const info = photo.detectionInfo;
+        $('.crop-note', panel).textContent = `${info.method.includes('tile') ? '分区搜索后定位' : '整图定位'} · 原图脸部宽约 ${number(info.sourceFaceWidthPx, 0)} px · 裁剪复测，原文件未修改。`;
+        $('.crop-note', panel).hidden = false;
+      }
       const badge = $('.photo-status', panel);
       badge.textContent = photo.error ? '未纳入比较' : photo.result ? (photo.quality?.warnings.length ? '已测量 · 有拍摄提示' : `${photo.landmarks.length} 个关键点`) : '等待分析';
       badge.classList.toggle('error', Boolean(photo.error));
@@ -204,12 +216,16 @@ function drawPhoto(side) {
   canvas.style.height = height + 'px';
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
-  const scale = Math.min(width / photo.width, height / photo.height);
+  const region = state.faceZoom && photo.cropRegion ? photo.cropRegion : { x: 0, y: 0, width: 1, height: 1 };
+  const scale = Math.min(width / (photo.width * region.width), height / (photo.height * region.height));
   const w = photo.width * scale;
   const h = photo.height * scale;
-  const x = (width - w) / 2;
-  const y = (height - h) / 2;
-  ctx.drawImage(photo.image, x, y, w, h);
+  const x = (width - w * region.width) / 2 - region.x * w;
+  const y = (height - h * region.height) / 2 - region.y * h;
+  // Keep the original/profiled image in an <img>; a default sRGB canvas would
+  // flatten its display gamut. Canvas is transparent and contains overlays only.
+  const source = $('.source-photo', panel);
+  Object.assign(source.style, { width: `${w}px`, height: `${h}px`, left: `${x}px`, top: `${y}px` });
   if (!photo.landmarks || state.overlay === 'none') return;
   const points = photo.landmarks;
   const map = (point) => ({ x: x + point.x * w, y: y + point.y * h });
@@ -284,7 +300,7 @@ function request(type, payload = {}, transfers = []) {
       pending.delete(id);
       reject(new Error('本机计算超时，请刷新后重试，或换用桌面版 Chrome / Edge。'));
       resetWorker();
-    }, type === 'initialize' ? 90000 : 45000);
+    }, type === 'initialize' ? 90000 : 120000);
     pending.set(id, { resolve, reject, timer });
     try { worker.postMessage({ id, type, ...payload }, transfers); }
     catch (_error) { pending.delete(id); clearTimeout(timer); payload.bitmap?.close(); reject(new Error('无法启动浏览器推理，请换用支持 WebAssembly 的现代浏览器。')); }
@@ -335,17 +351,18 @@ async function analyze() {
         if (!photo.result) {
           photo.error = '';
           try {
-            const scale = Math.min(1, MAX_EDGE / Math.max(photo.width, photo.height));
-            const width = Math.max(1, Math.round(photo.width * scale));
-            const height = Math.max(1, Math.round(photo.height * scale));
-            const bitmap = await createImageBitmap(photo.image, { resizeWidth: width, resizeHeight: height, resizeQuality: 'high' });
+            const { width, height } = photo;
+            // The worker crops from original pixels before resizing each pass.
+            const bitmap = await createImageBitmap(photo.image);
             const response = await request('detect', { bitmap }, [bitmap]);
             const faces = response.faceLandmarks;
-            if (!faces.length) throw new Error('未检测到人脸。请使用清晰、无遮挡的正面照片。');
+            if (!faces.length) throw new Error('整图与分区搜索均未检测到人脸。请手动裁剪到脸部后重试；如果原图脸部像素过少，放大也无法补回细节。');
             if (faces.length !== 1) throw new Error('检测到多张脸。请裁剪到一人后重新加入；此照片未参与评分。');
             const geometry = extractGeometry(faces[0], width, height);
             if (!geometry.valid) throw new Error('关键点未形成完整有效的比例，请换一张照片。');
             photo.landmarks = faces[0];
+            photo.cropRegion = response.cropRegions?.[0];
+            photo.detectionInfo = response.detectionInfo;
             photo.result = geometry;
             photo.quality = summarizeQuality(faces[0], width, height, response.faceBlendshapes[0]?.categories ?? []);
           } catch (error) {
@@ -381,6 +398,14 @@ function renderResults() {
   $('#results').hidden = false;
   $('#empty-results').hidden = true;
   $('#overall-score').textContent = number(result.median);
+  const diagnostics = comparisonDiagnostics(state.photos.a.map((p) => p.result), state.photos.b.map((p) => p.result), result);
+  $('#difference-value').textContent = `${number(diagnostics.medianDifference * 100)}%`;
+  $('#score-explanation').textContent = `当前照片配对的加权比例差异中位数为 ${number(diagnostics.medianDifference * 100)}%。分数由固定指数公式映射：约 13.9% 的差异即可得到 50 分；它不是人眼相似度的百分比。`;
+  $('#within-groups').innerHTML = ['a', 'b'].map((side) => {
+    const within = diagnostics.within[side];
+    return `<div><strong>${side.toUpperCase()} 组内部</strong><p>${within.count ? `比例差异 ${number(within.medianDifference * 100)}% · 分数 ${number(within.medianScore)}<br>${within.count} 个不同照片配对，范围 ${number(within.min)}–${number(within.max)}` : '至少两张有效照片才能估计组内波动。'}</p></div>`;
+  }).join('');
+  $('#top-differences').innerHTML = diagnostics.contributions.slice(0, 3).map((feature) => `<li>${feature.label}：平均相对差异 ${number(feature.meanDifference * 100)}%，占平均加权差异的 ${number(feature.share * 100)}%。</li>`).join('');
   $('#range-stats').innerHTML = `<div>最低 — 最高<strong>${number(result.min)} – ${number(result.max)}</strong></div><div>四分位距<strong>${number(result.iqr)}</strong></div><div>有效配对<strong>${result.pairScores.length}</strong></div>`;
   $('#group-bars').innerHTML = GROUP_DEFINITIONS.map((group) => `<div class="group-row"><div class="group-label"><span>${group.label}</span><strong>${number(result.groupMedians[group.id])}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${result.groupMedians[group.id]}%"></div></div></div>`).join('');
   $('#pair-count').textContent = `${result.validPhotoCounts.a} × ${result.validPhotoCounts.b} 个有效配对`;
@@ -444,6 +469,12 @@ function exportCsv() {
   const rows = [['record_type', 'photo_a', 'photo_b', 'group', 'feature', 'value_a', 'value_b', 'relative_difference', 'score', 'note']];
   rows.push(['metadata', '', '', '', 'method', '', '', '', '', 'FaceTwin 0.1; MediaPipe Tasks Vision 0.10.21; face_landmarker float16/1; geometry only; scale=0.20; floor=0.01; 5 equal-weight groups; not calibrated to human ratings']);
   rows.push(['summary', '', '', '', 'median', '', '', '', state.results.median, 'All valid cross-photo pairs']);
+  const diagnostics = comparisonDiagnostics(state.photos.a.map((p) => p.result), state.photos.b.map((p) => p.result), state.results);
+  rows.push(['summary', '', '', '', 'median_weighted_difference', '', '', diagnostics.medianDifference, '', 'Raw geometric difference; not calibrated perception']);
+  for (const side of ['a', 'b']) {
+    const within = diagnostics.within[side];
+    rows.push(['within_group', side.toUpperCase(), '', '', 'unique_photo_pairs', within.count, '', within.medianDifference ?? '', within.medianScore ?? '', 'User-supplied grouping; no identity verification']);
+  }
   for (const key of ['min', 'max', 'q1', 'q3', 'iqr']) rows.push(['summary', '', '', '', key, '', '', '', state.results[key], 'Descriptive photo variation, not a confidence interval']);
   for (const pair of state.results.pairs) {
     rows.push(['pair', label('a', pair.aIndex), label('b', pair.bIndex), '', '', '', '', pair.meanDifference, pair.score, '']);
@@ -454,6 +485,7 @@ function exportCsv() {
   }
   for (const side of ['a', 'b']) state.photos[side].forEach((photo, index) => {
     rows.push(['photo_status', side === 'a' ? label(side, index) : '', side === 'b' ? label(side, index) : '', '', '', '', '', '', '', photo.error || photo.quality?.warnings.map((w) => w.message).join(' | ') || 'Measured']);
+    rows.push(['preprocessing', side === 'a' ? label(side, index) : '', side === 'b' ? label(side, index) : '', '', 'decode_and_crop', photo.width, photo.height, '', '', `${photo.decodeMethod}; ${photo.colorNote}; ${JSON.stringify(photo.detectionInfo ?? {})}; crop=${JSON.stringify(photo.cropRegion ?? null)}`]);
   });
   const csv = rows.map((row) => row.map((cell) => '"' + String(cell).replaceAll('"', '""') + '"').join(',')).join('\r\n');
   const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
@@ -467,6 +499,7 @@ $('#metric-select').innerHTML = FEATURE_DEFINITIONS.map((feature) => `<option va
 $('#metric-select').addEventListener('change', (event) => { state.metric = event.target.value; drawAll(); updateFeatureSelection(); });
 document.querySelectorAll('[data-overlay]').forEach((button) => button.addEventListener('click', () => setOverlay(button.dataset.overlay)));
 $('#show-points').addEventListener('change', (event) => { state.pointLabels = event.target.checked; drawAll(); });
+$('#face-zoom').addEventListener('change', (event) => { state.faceZoom = event.target.checked; drawAll(); });
 $('#compare').addEventListener('click', analyze);
 $('#load-model').addEventListener('click', async () => {
   if (isLocked()) return;

@@ -104,6 +104,41 @@ The five groups each have 20% weight. Features share their group's weight equall
 
 For example, `D = 0.20 × ln(2) ≈ 0.1386` maps to a score of 50: roughly 13.9% weighted proportional difference, not “half alike.” The UI displays the raw weighted difference alongside the unchanged score. It also shows within-group comparisons (unique unordered photo pairs, no self-pairs) and the largest feature contributions to mean weighted difference across all cross-group pairs. Large within-group variation warns that photos or landmark estimates can dominate; it is not used to inflate scores or perform identity verification. Contribution percentages explain the geometry formula, not human perception, and average contributions should not be added to reconstruct a median score.
 
+### Lip expression hints and experimental reweighting
+
+The interface keeps **original and adjusted scores side by side**. The original geometry, five group weights, measurements, pair membership, and aggregation are unchanged. The adjustment only changes the influence of `lipThickness`; it does not reconstruct neutral lips, change pixel/landmark coordinates, or correct other expression-sensitive features such as mouth width. Both scores remain uncalibrated against human resemblance ratings, and the adjusted score may increase or decrease.
+
+The existing model already returns blendshape coefficients; no additional model or package is downloaded. `mouthPressLeft/Right` represent lower-lip compression and `mouthRollUpper/Lower` represent inward rolling. Pucker, funnel, smile, stretch, and jaw-open signals also inform lip measurement interference. `mouthClose` is displayed but **does not independently trigger a penalty**: ordinary lip closure is not proof of pressing. These coefficients are estimated from the same landmarks as the geometry, not independent evidence or calibrated probabilities. Thin measured lips and inter-person differences are never inputs to the reliability rule.
+
+`src/expression.js` defines the versioned `lip-reliability-v1` policy. Its thresholds were fixed before inspecting the evaluation photos and are explicit engineering heuristics:
+
+| Factor | Rule |
+| --- | --- |
+| Expression | Maximum of press, roll, pucker, funnel, smile, stretch, and jaw-open coefficients; reliability decreases smoothly from 1 at 0.20 to 0 at 0.70. |
+| Source face width | Quality increases smoothly from 0 at 60 pixels to 1 at 140 pixels. Cropping does not invent additional source pixels. |
+| Pose proxies | Quality decreases smoothly for nose displacement / outer-eye span from 0.12 to 0.30, and left/right eye-width imbalance from 1.35 to 2.00. Natural asymmetry can also trigger these proxies. |
+| Clipping | A clipped-face warning caps the quality factor at 0.25. |
+| Missing data | Missing/invalid coefficients in any of the eleven interference channels or quality measurements makes automatic lip reliability unknown and sets its applied factor to 0, never neutral. The display-only `mouthClose` channel is optional. |
+
+The transition is `smoothstep(t) = t²(3 − 2t)` with `t` clamped to `[0,1]` over the stated interval. The quality factor is the minimum of size, pose, and clipping factors. Per-photo automatic reliability is `q = expression_reliability × quality_factor`. Quality warnings are kept separate from pressing/rolling hints; a small face alone does not imply a lip action. q is an engineering factor, not confidence in the existence of an expression.
+
+For each valid photo pair, let `q_pair = min(q_A, q_B)`. The original lip feature weight is 0.10. Multiply that weight by `q_pair`, leave the other twelve base weights unchanged, and normalize **all** retained feature weights globally:
+
+```text
+w'_lip = 0.10 × q_pair
+w'_k   = w_k                         for every other feature
+D_adj  = sum(w'_k × d_k) / sum(w'_k)
+S_adj  = 100 × exp(−D_adj / 0.20)
+```
+
+When both q values are 1, the original score is preserved exactly. At q=0 the pair still compares the other twelve features. Retained base-weight coverage ranges from 90% to 100%; it is displayed separately from the normalized lip weight and is **not statistical confidence or accuracy**. The missing lip weight is not reassigned solely to mouth width. Pair and within-group summaries use the same pairs and median convention as the original score.
+
+Each photo offers **automatic / retain lip (q=1) / exclude lip (q=0)** controls. Overrides immediately recompute adjusted scores without rerunning inference or altering the original score. Automatic signals, reasons, and q remain visible for auditing. A retain override is the user's choice to trust a measurement; it does not prove neutral expression. A descriptive lip reference uses only valid photos with applied q≥0.5 and a q-weighted median; no eligible images means “cannot reliably estimate.” This reference helps inspect multi-photo variation but never substitutes for raw pair measurements or selects the thickest lips.
+
+CSV export preserves the existing original records and adds adjusted pairs/features/summaries, retained/effective weights, coverage, per-photo automatic and applied reliability, overrides, quality measurements, raw blendshape coefficients, and the complete policy. The table remains anonymous (A1/B1 labels). The original 10 columns are retained, followed by `base_weight`, `retained_weight`, `effective_weight`, `coverage`, and `reliability`; consumers should use column names. These records make the arithmetic reproducible, not the expression interpretation validated. Private photo runs stay under ignored `runs/` folders with separate input provenance and output reports.
+
+Model/action references: [MediaPipe model overview](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), [blendshape model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Blendshape%20V2.pdf), [mouthPressLeft](https://developer.apple.com/documentation/arkit/arfaceanchor/blendshapelocation/mouthpressleft), [mouthRollUpper](https://developer.apple.com/documentation/arkit/arfaceanchor/blendshapelocation/mouthrollupper), and [mouthClose](https://developer.apple.com/documentation/arkit/arfaceanchor/blendshapelocation/mouthclose).
+
 For N valid photos in A and M in B, the app computes every N × M pair and reports:
 
 - The median pair score as the headline number.
@@ -135,6 +170,9 @@ src/inference.worker.js     MediaPipe initialization and landmark inference
 src/crop.js                 Crop planning, coordinate mapping and deduplication
 src/media.js                Native photo decoding and local HEIF fallback
 src/diagnostics.js          Within-group variability and score contributions
+src/expression.js           Versioned lip-action and quality reliability policy
+src/adjustment.js           Lip-only reweighting, coverage and reference summaries
+src/export.js               Original/adjusted audit CSV records
 src/geometry.js             Feature definitions, geometry, comparisons, quality hints
 scripts/setup_assets.py     Pinned downloads and integrity verification
 scripts/serve.py            Restricted loopback server and HEIF endpoint
@@ -143,6 +181,9 @@ tests/geometry.test.mjs     Numerical software tests
 tests/server_test.py        Static-server access-scope tests
 tests/crop.test.mjs         Crop geometry and worker orchestration tests
 tests/diagnostics.test.mjs  Score explanation and variability tests
+tests/expression.test.mjs   Action hints, unknown data, quality and overrides
+tests/adjustment.test.mjs   Weight normalization and unchanged baseline invariants
+tests/export.test.mjs       Reconstructable CSV evidence and anonymous labels
 tests/heif_test.py          HEIF format, orientation, metadata and color tests
 vendor/                    Downloaded runtime, ignored by Git
 models/                    Downloaded model, ignored by Git
@@ -162,6 +203,8 @@ uv run python -m unittest discover -s tests -p '*test.py'
 Tests cover physical ratios, image aspect ratio, translation/scale/roll/reflection invariance, score symmetry, group weighting, all-pair aggregation, outliers, invalid/degenerate coordinates, and quality warnings. These are software tests, not a resemblance benchmark or a calibration experiment.
 
 Verification includes numerical geometry, crop mapping/deduplication, worker orchestration, score diagnostics, actual in-memory HEIF round trips, metadata stripping, and HTTP access checks. A complete browser run with both user-supplied photo groups also exercised HEIF input, tiled small-face recovery, crop refinement, all-pair results, and CSV export. Private input photos and their numerical diagnostic report are not included in source control. These checks establish software behavior, not perceptual resemblance validity or universal small-face detection accuracy.
+
+Expression adjustment verification additionally covers 51 JavaScript and 19 Python tests, full-input browser comparisons in automatic/all-retained/all-excluded modes, unchanged original feature records and scores, restoration of automatic state, manual overrides, action-coefficient display, and lip measurement overlays. An independent CSV audit reconstructs every adjusted score and effective weight, separates expression-only and quality-only sensitivity calculations, and checks input hashes before/after the run. No expression-accuracy or perceptual-validity claim follows from a higher score or these software checks.
 
 ## References and third-party assets
 

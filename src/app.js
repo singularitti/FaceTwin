@@ -1,6 +1,9 @@
 import { FEATURE_DEFINITIONS, GROUP_DEFINITIONS, extractGeometry, aggregateComparisons, summarizeQuality } from './geometry.js';
 import { comparisonDiagnostics } from './diagnostics.js';
 import { isSupportedImage, loadPhoto } from './media.js';
+import { analyzeLipReliability, LIP_SIGNAL_DEFINITIONS } from './expression.js';
+import { aggregateAdjusted, withinGroupAdjusted, summarizeLipReference } from './adjustment.js';
+import { buildExportRows, serializeCsv } from './export.js';
 
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const MAX_PHOTOS = 8;
@@ -9,7 +12,7 @@ const MAX_PIXELS = 32_000_000;
 const state = {
   photos: { a: [], b: [] }, selected: { a: 0, b: 0 },
   overlay: 'contours', metric: FEATURE_DEFINITIONS[0].id, pointLabels: false,
-  connections: { mesh: [], contours: [] }, results: null,
+  connections: { mesh: [], contours: [] }, results: null, adjusted: null,
   busy: false, importing: false, ready: false, faceZoom: true,
 };
 let worker;
@@ -20,6 +23,8 @@ const number = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(dig
 const label = (side, index) => `${side.toUpperCase()}${index + 1}`;
 const current = (side) => state.photos[side][state.selected[side]];
 const isLocked = () => state.busy || state.importing;
+const modeLabel = (mode) => ({ auto: '自动', include: '手动保留', exclude: '手动排除' }[mode] ?? '自动');
+const reliability = (photo) => photo.lip?.reliability ?? 0;
 
 function showError(message = '') {
   $('#global-error').textContent = message;
@@ -36,6 +41,7 @@ function status(message, kind = '') {
 
 function invalidateResults() {
   state.results = null;
+  state.adjusted = null;
   $('#results').hidden = true;
   $('#empty-results').hidden = false;
 }
@@ -46,7 +52,7 @@ function updateControls() {
   $('#clear-all').disabled = isLocked() || (!state.photos.a.length && !state.photos.b.length);
   $('#load-model').disabled = isLocked() || state.ready;
   $('#load-model').textContent = state.ready ? '已加载' : '预先加载';
-  document.querySelectorAll('.add-photo,.remove-photo,.upload-empty,input[type="file"]').forEach((button) => { button.disabled = isLocked(); });
+  document.querySelectorAll('.add-photo,.remove-photo,.upload-empty,input[type="file"],.lip-mode').forEach((button) => { button.disabled = isLocked(); });
 }
 
 async function addPhotos(side, files) {
@@ -77,7 +83,7 @@ async function addPhotos(side, files) {
           errors.push('有照片超过 3200 万像素或尺寸无效，请先缩小照片。');
           continue;
         }
-        state.photos[side].push({ ...photo, width, height, result: null, error: '', quality: null });
+        state.photos[side].push({ ...photo, width, height, result: null, error: '', quality: null, blendshapes: [], lip: null, lipMode: 'auto' });
         invalidateResults();
       } catch (error) {
         if (photo?.url) URL.revokeObjectURL(photo.url);
@@ -119,7 +125,7 @@ function renderPanels() {
       <div class="photo-stage ${photo ? 'has-photo' : ''}">
         ${photo ? `<img class="source-photo" alt="${label(side, state.selected[side])} 的照片"><canvas aria-label="人物 ${side.toUpperCase()} 的关键点图层"></canvas><span class="photo-caption">${label(side, state.selected[side])} · ${photo.width} × ${photo.height}</span><span class="photo-status"></span>` : `<button class="upload-empty" aria-label="选择人物 ${side.toUpperCase()} 的照片"><div class="upload-glyph" aria-hidden="true"><span></span></div><strong>选择照片，或拖放到这里</strong><span class="small">一张起步，多张更完整</span><span class="format-hint">JPG / PNG / WEBP / HEIF · ≤ 12 MB</span></button>`}
       </div>
-      <div class="thumbnail-row"></div><p class="color-note small muted" hidden></p><p class="crop-note small muted" hidden></p><ul class="quality-list"></ul><p class="photo-error" hidden></p>`;
+      <div class="thumbnail-row"></div><p class="color-note small muted" hidden></p><p class="crop-note small muted" hidden></p><ul class="quality-list"></ul><div class="lip-assessment" hidden></div><p class="photo-error" hidden></p>`;
     const input = $('input[type="file"]', panel);
     input.addEventListener('change', () => addPhotos(side, input.files));
     $('.upload-empty', panel)?.addEventListener('click', () => input.click());
@@ -180,11 +186,66 @@ function renderPanels() {
         $('.photo-error', panel).hidden = false;
         $('.photo-error', panel).textContent = photo.error;
       }
+      if (photo.result && photo.lip) renderLipAssessment($('.lip-assessment', panel), photo, label(side, state.selected[side]));
     }
     container.append(panel);
   }
   drawAll();
   updateControls();
+}
+
+function renderLipAssessment(container, photo, photoLabel) {
+  const lip = photo.lip;
+  container.hidden = false;
+  const title = document.createElement('strong');
+  title.textContent = lip.suspectedPress ? '疑似压唇／卷唇线索' : !lip.known ? '嘴部动作或质量信息不足' : '唇厚测量可靠度';
+  const description = document.createElement('p');
+  description.className = 'small';
+  description.textContent = `自动 q ${number(lip.autoReliability, 2)} · 采用 q ${number(lip.reliability, 2)} · ${modeLabel(lip.mode)}。这是工程启发式，不是抿嘴概率。`;
+  const reasons = document.createElement('ul');
+  reasons.className = 'lip-reasons small';
+  for (const reason of lip.reasons) {
+    const item = document.createElement('li');
+    item.textContent = reason.message;
+    reasons.append(item);
+  }
+  if (!lip.reasons.length) {
+    const item = document.createElement('li');
+    item.textContent = '当前信号未触发降权；这不保证没有表情或定位误差。';
+    reasons.append(item);
+  }
+  const control = document.createElement('label');
+  control.className = 'lip-control small';
+  control.append(document.createTextNode('本张唇厚 '));
+  const select = document.createElement('select');
+  select.className = 'lip-mode';
+  select.setAttribute('aria-label', `${photoLabel} 的唇厚处理`);
+  for (const [value, text] of [['auto', '自动判断'], ['include', '保留唇厚（q = 1）'], ['exclude', '排除唇厚（q = 0）']]) {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = text; select.append(option);
+  }
+  select.value = photo.lipMode;
+  select.addEventListener('change', () => {
+    if (isLocked()) return;
+    photo.lipMode = select.value;
+    photo.lip = analyzeLipReliability(photo.blendshapes, photo.quality, photo.lipMode);
+    renderPanels();
+    if (state.results) renderResults();
+    $('#progress').textContent = `${photoLabel} 的唇厚处理已更新；原始分数不变。`;
+  });
+  control.append(select);
+  const details = document.createElement('details');
+  details.className = 'lip-signals small';
+  const summary = document.createElement('summary');
+  summary.textContent = '查看嘴部动作系数';
+  const signals = document.createElement('dl');
+  for (const signal of LIP_SIGNAL_DEFINITIONS) {
+    const term = document.createElement('dt'); term.textContent = signal.label;
+    const value = document.createElement('dd'); value.textContent = number(lip.signals[signal.id], 3);
+    signals.append(term, value);
+  }
+  details.append(summary, signals);
+  container.replaceChildren(title, description, reasons, control, details);
 }
 
 function drawConnections(ctx, points, connections, map, color, lineWidth = 1) {
@@ -364,7 +425,9 @@ async function analyze() {
             photo.cropRegion = response.cropRegions?.[0];
             photo.detectionInfo = response.detectionInfo;
             photo.result = geometry;
-            photo.quality = summarizeQuality(faces[0], width, height, response.faceBlendshapes[0]?.categories ?? []);
+            photo.blendshapes = response.faceBlendshapes[0]?.categories ?? [];
+            photo.quality = summarizeQuality(faces[0], width, height, photo.blendshapes);
+            photo.lip = analyzeLipReliability(photo.blendshapes, photo.quality, photo.lipMode);
           } catch (error) {
             photo.error = error.message;
             if (!state.ready) throw error;
@@ -395,16 +458,32 @@ async function analyze() {
 
 function renderResults() {
   const result = state.results;
+  const geometries = Object.fromEntries(['a', 'b'].map((side) => [side, state.photos[side].map((photo) => photo.result)]));
+  const reliabilities = Object.fromEntries(['a', 'b'].map((side) => [side, state.photos[side].map(reliability)]));
+  const adjusted = aggregateAdjusted(geometries.a, geometries.b, reliabilities.a, reliabilities.b);
+  state.adjusted = adjusted;
   $('#results').hidden = false;
   $('#empty-results').hidden = true;
   $('#overall-score').textContent = number(result.median);
   const diagnostics = comparisonDiagnostics(state.photos.a.map((p) => p.result), state.photos.b.map((p) => p.result), result);
   $('#difference-value').textContent = `${number(diagnostics.medianDifference * 100)}%`;
-  $('#score-explanation').textContent = `当前照片配对的加权比例差异中位数为 ${number(diagnostics.medianDifference * 100)}%。分数由固定指数公式映射：约 13.9% 的差异即可得到 50 分；它不是人眼相似度的百分比。`;
+  $('#adjusted-score').textContent = number(adjusted.median);
+  const change = adjusted.median - result.median;
+  $('#score-change').textContent = `与原始中位数相比 ${change > 0 ? '+' : ''}${number(change)} 分 · 不是准确度提升的证明`;
+  $('#adjusted-difference').textContent = `${number(adjusted.medianDifference * 100)}%`;
+  $('#adjusted-range').innerHTML = `<div>最低 — 最高<strong>${number(adjusted.min)} – ${number(adjusted.max)}</strong></div><div>四分位距<strong>${number(adjusted.iqr)}</strong></div><div>有效配对<strong>${adjusted.pairScores.length}</strong></div>`;
+  $('#coverage-summary').textContent = `保留的基础权重：中位数 ${number(adjusted.medianCoverage * 100)}%（${number(adjusted.minCoverage * 100)}–${number(adjusted.maxCoverage * 100)}%）。归一化后唇厚有效权重：中位数 ${number(adjusted.medianLipEffectiveWeight * 100)}%（原始 10%）。`;
+  $('#score-explanation').textContent = `原始评分中，加权比例差异中位数为 ${number(diagnostics.medianDifference * 100)}%。分数由固定指数公式映射：约 13.9% 的差异即可得到 50 分；它不是人眼相似度的百分比。`;
   $('#within-groups').innerHTML = ['a', 'b'].map((side) => {
     const within = diagnostics.within[side];
-    return `<div><strong>${side.toUpperCase()} 组内部</strong><p>${within.count ? `比例差异 ${number(within.medianDifference * 100)}% · 分数 ${number(within.medianScore)}<br>${within.count} 个不同照片配对，范围 ${number(within.min)}–${number(within.max)}` : '至少两张有效照片才能估计组内波动。'}</p></div>`;
+    const weighted = withinGroupAdjusted(geometries[side], reliabilities[side]);
+    return `<div><strong>${side.toUpperCase()} 组内部</strong><p>${within.count ? `原始 ${number(within.medianScore)} → 调整后 ${number(weighted.medianScore)}<br>比例差异 ${number(within.medianDifference * 100)}% → ${number(weighted.medianDifference * 100)}%<br>${within.count} 个不同照片配对；原始范围 ${number(within.min)}–${number(within.max)}，调整后 ${number(weighted.min)}–${number(weighted.max)}` : '至少两张有效照片才能估计组内波动。'}</p></div>`;
   }).join('');
+  $('#lip-references').innerHTML = ['a', 'b'].map((side) => {
+    const reference = summarizeLipReference(geometries[side], reliabilities[side]);
+    return `<div><strong>${side.toUpperCase()} 组唇厚参考</strong><p>${reference.count ? `唇厚／嘴宽 ${number(reference.value, 3)} · ${reference.count} / ${reference.totalCount} 张照片` : '无法可靠估计：没有采用 q ≥ 0.5 的有效照片。'}</p></div>`;
+  }).join('');
+  renderExpressionTable();
   $('#top-differences').innerHTML = diagnostics.contributions.slice(0, 3).map((feature) => `<li>${feature.label}：平均相对差异 ${number(feature.meanDifference * 100)}%，占平均加权差异的 ${number(feature.share * 100)}%。</li>`).join('');
   $('#range-stats').innerHTML = `<div>最低 — 最高<strong>${number(result.min)} – ${number(result.max)}</strong></div><div>四分位距<strong>${number(result.iqr)}</strong></div><div>有效配对<strong>${result.pairScores.length}</strong></div>`;
   $('#group-bars').innerHTML = GROUP_DEFINITIONS.map((group) => `<div class="group-row"><div class="group-label"><span>${group.label}</span><strong>${number(result.groupMedians[group.id])}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${result.groupMedians[group.id]}%"></div></div></div>`).join('');
@@ -419,10 +498,11 @@ function renderResults() {
     row.forEach((score, b) => {
       const td = document.createElement('td');
       const button = document.createElement('button');
-      button.textContent = number(score, 0);
+      const adjustedScore = adjusted.pairMatrix[a][b];
+      button.textContent = score === null ? '—' : `${number(score, 0)} → ${number(adjustedScore, 0)}`;
       button.disabled = score === null;
       button.dataset.a = a; button.dataset.b = b;
-      button.setAttribute('aria-label', `${label('a', a)} 与 ${label('b', b)}：${score === null ? '无效配对' : number(score) + ' 分'}`);
+      button.setAttribute('aria-label', `${label('a', a)} 与 ${label('b', b)}：${score === null ? '无效配对' : `原始 ${number(score)}，调整后 ${number(adjustedScore)} 分`}`);
       if (score !== null) button.style.backgroundColor = `hsl(82 28% ${97 - score * .23}%)`;
       button.addEventListener('click', () => {
         state.selected.a = a; state.selected.b = b;
@@ -444,11 +524,34 @@ function renderResults() {
   updateFeatureSelection();
 }
 
+function renderExpressionTable() {
+  const rows = $('#expression-rows');
+  rows.replaceChildren();
+  for (const side of ['a', 'b']) state.photos[side].forEach((photo, index) => {
+    const row = document.createElement('tr');
+    const first = document.createElement('td');
+    const button = document.createElement('button');
+    button.textContent = label(side, index);
+    button.setAttribute('aria-label', `查看 ${label(side, index)} 的嘴部动作`);
+    button.addEventListener('click', () => {
+      state.selected[side] = index;
+      renderPanels(); updatePairSelection();
+      $(`.photo-panel[data-side="${side}"] .lip-assessment`)?.scrollIntoView({ block: 'center' });
+    });
+    first.append(button); row.append(first);
+    const lip = photo.lip;
+    const values = photo.result && lip ? [number(lip.press, 3), number(lip.roll, 3), number(lip.otherExpression, 3), number(lip.qualityReliability, 2), number(lip.autoReliability, 2), `${number(lip.reliability, 2)} / ${modeLabel(lip.mode)}`] : ['—', '—', '—', '—', '—', '未纳入比较'];
+    for (const value of values) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
+    rows.append(row);
+  });
+}
+
 function updatePairSelection() {
   if (!state.results) return;
   document.querySelectorAll('.matrix button').forEach((button) => button.setAttribute('aria-pressed', String(+button.dataset.a === state.selected.a && +button.dataset.b === state.selected.b)));
   const pair = state.results.pairs.find((p) => p.aIndex === state.selected.a && p.bIndex === state.selected.b);
-  $('#pair-detail').innerHTML = pair ? `当前查看 <strong>${label('a', state.selected.a)} × ${label('b', state.selected.b)}</strong> · 几何接近度 <strong>${number(pair.score)} / 100</strong>` : '当前选中照片未形成有效配对。';
+  const adjusted = state.adjusted?.pairs.find((p) => p.aIndex === state.selected.a && p.bIndex === state.selected.b);
+  $('#pair-detail').innerHTML = pair && adjusted ? `当前查看 <strong>${label('a', state.selected.a)} × ${label('b', state.selected.b)}</strong><br>原始 <strong>${number(pair.score)}</strong> → 调整后 <strong>${number(adjusted.score)}</strong> / 100<br>唇厚 q ${number(adjusted.lipReliability, 2)} · 有效权重 ${number(adjusted.lipEffectiveWeight * 100)}% · 保留基础权重 ${number(adjusted.coverage * 100)}%` : '当前选中照片未形成有效配对。';
   drawAligned();
 }
 
@@ -465,29 +568,8 @@ function setOverlay(mode) {
 }
 
 function exportCsv() {
-  if (!state.results) return;
-  const rows = [['record_type', 'photo_a', 'photo_b', 'group', 'feature', 'value_a', 'value_b', 'relative_difference', 'score', 'note']];
-  rows.push(['metadata', '', '', '', 'method', '', '', '', '', 'FaceTwin 0.1; MediaPipe Tasks Vision 0.10.21; face_landmarker float16/1; geometry only; scale=0.20; floor=0.01; 5 equal-weight groups; not calibrated to human ratings']);
-  rows.push(['summary', '', '', '', 'median', '', '', '', state.results.median, 'All valid cross-photo pairs']);
-  const diagnostics = comparisonDiagnostics(state.photos.a.map((p) => p.result), state.photos.b.map((p) => p.result), state.results);
-  rows.push(['summary', '', '', '', 'median_weighted_difference', '', '', diagnostics.medianDifference, '', 'Raw geometric difference; not calibrated perception']);
-  for (const side of ['a', 'b']) {
-    const within = diagnostics.within[side];
-    rows.push(['within_group', side.toUpperCase(), '', '', 'unique_photo_pairs', within.count, '', within.medianDifference ?? '', within.medianScore ?? '', 'User-supplied grouping; no identity verification']);
-  }
-  for (const key of ['min', 'max', 'q1', 'q3', 'iqr']) rows.push(['summary', '', '', '', key, '', '', '', state.results[key], 'Descriptive photo variation, not a confidence interval']);
-  for (const pair of state.results.pairs) {
-    rows.push(['pair', label('a', pair.aIndex), label('b', pair.bIndex), '', '', '', '', pair.meanDifference, pair.score, '']);
-    for (const feature of FEATURE_DEFINITIONS) {
-      const item = pair.metrics[feature.id];
-      rows.push(['feature', label('a', pair.aIndex), label('b', pair.bIndex), feature.group, feature.id, item.a, item.b, item.difference, item.score, feature.formula]);
-    }
-  }
-  for (const side of ['a', 'b']) state.photos[side].forEach((photo, index) => {
-    rows.push(['photo_status', side === 'a' ? label(side, index) : '', side === 'b' ? label(side, index) : '', '', '', '', '', '', '', photo.error || photo.quality?.warnings.map((w) => w.message).join(' | ') || 'Measured']);
-    rows.push(['preprocessing', side === 'a' ? label(side, index) : '', side === 'b' ? label(side, index) : '', '', 'decode_and_crop', photo.width, photo.height, '', '', `${photo.decodeMethod}; ${photo.colorNote}; ${JSON.stringify(photo.detectionInfo ?? {})}; crop=${JSON.stringify(photo.cropRegion ?? null)}`]);
-  });
-  const csv = rows.map((row) => row.map((cell) => '"' + String(cell).replaceAll('"', '""') + '"').join(',')).join('\r\n');
+  if (!state.results || !state.adjusted) return;
+  const csv = serializeCsv(buildExportRows(state.photos, state.results, state.adjusted));
   const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
   const link = document.createElement('a');
   link.href = url; link.download = 'facetwin-geometry.csv';

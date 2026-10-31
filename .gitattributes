@@ -1,3 +1,6 @@
 # Keep verified public data/assets byte-identical across checkout platforms.
 showcase/assets/** -text
+showcase/assets/faces/*.png binary
+showcase/assets/downloads/*.pdf binary
+showcase/assets/downloads/*.csv -text whitespace=cr-at-eol
 showcase/data/results.json -text

@@ -1,0 +1,3 @@
+# Keep verified public data/assets byte-identical across checkout platforms.
+showcase/assets/** -text
+showcase/data/results.json -text

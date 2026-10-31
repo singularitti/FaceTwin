@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "assets/faces/W0573.png",
+      "bytes": 36329,
+      "sha256": "8884cb8874f70ff35952814614e7dd90f96bf5c45c47ff4c99c28f5556324c05"
+    },
+    {
+      "path": "assets/faces/W0867.png",
+      "bytes": 33699,
+      "sha256": "b26bb6bd43dfd90d117c538b624b9c1f44d00d2f651d034f65637b145608e739"
+    },
+    {
+      "path": "assets/faces/W0273.png",
+      "bytes": 735852,
+      "sha256": "153a539d10b79ee666fc1c0c40d778e076564930082f48b43e6472fd638ec929"
+    },
+    {
+      "path": "assets/faces/W1262.png",
+      "bytes": 595912,
+      "sha256": "e85680a58d71622d57305b12ed2b0e53eda38fe3661ccb7b3de9c25857a162a9"
+    },
+    {
+      "path": "assets/faces/W1317.png",
+      "bytes": 64159,
+      "sha256": "7878b5afe3c908ab5457a7a19f6965725eee2cc6a41ee8f847b5ffce06eb8217"
+    },
+    {
+      "path": "assets/faces/W1624.png",
+      "bytes": 55004,
+      "sha256": "79563af3d82ecbc343f42383892912ce0922b02f5b234ae999254cc80f6dfa2c"
+    },
+    {
+      "path": "assets/faces/W0776.png",
+      "bytes": 27643,
+      "sha256": "d9f083bfb610fc998404241084e1c29d5c3a1e9500747d30f0d68e084321ca7c"
+    },
+    {
+      "path": "assets/faces/W1409.png",
+      "bytes": 118706,
+      "sha256": "922261281a1c5d615d0fa45941d5344af69d306001591c6b500555feb484dffe"
+    },
+    {
+      "path": "assets/faces/W0123.png",
+      "bytes": 124586,
+      "sha256": "0312b814e807db25ac4081a017e324130e8ff0ec8e66e5b2927ed1d9e6b07ae8"
+    },
+    {
+      "path": "assets/faces/W1497.png",
+      "bytes": 94933,
+      "sha256": "74e6fb77b7fc497add6988562fd4e784c98037c07aed3ff2d9981394120ebb7f"
+    },
+    {
+      "path": "assets/downloads/top5.csv",
+      "bytes": 1732,
+      "sha256": "0da7b4811a50e1b2d173b848b798aadeb0152fb8a569d58c3c89cc3b83f671f2"
+    },
+    {
+      "path": "assets/downloads/top5-feature-comparisons.csv",
+      "bytes": 15466,
+      "sha256": "d62757d1606560ec3431dd1e752e0db3f64b0acb6e0819e78a8a7be6e082a627"
+    },
+    {
+      "path": "assets/downloads/verification.csv",
+      "bytes": 401,
+      "sha256": "3f557c9dfbf8d7db70702d0cba69b2bf2aa5d473be9c5c365620ff323368b018"
+    },
+    {
+      "path": "assets/downloads/facetwin-wflw-top5.pdf",
+      "bytes": 4719662,
+      "sha256": "28fe9f38712cb6e44a21b9d68ede2d0e4e96b11af0667b226e8a0076a515790f"
+    },
+    {
+      "path": "data/results.json",
+      "bytes": 303930,
+      "sha256": "e9dd0b260156eb68b6003b461841fadfd6f5a2a7c8040fddc2c9ddb3fa5a8681"
+    }
+  ]
+}

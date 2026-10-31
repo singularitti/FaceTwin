@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#f4f1eb" />
+    <meta name="description"
+      content="FaceTwin WFLW 前五组面部几何比较：用 13 项二维比例观察相似之处，同时公开测量、质量提醒与方法边界。" />
+    <title>FaceTwin — WFLW 几何相似度展览</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到内容</a>
+    <header class="masthead page-width">
+      <a class="wordmark" href="#"
+        aria-label="FaceTwin 首页">FaceTwin<span class="wordmark-dot" aria-hidden="true">·</span></a>
+      <span class="edition">WFLW SHOWCASE <span>研究展览 / 01</span></span>
+      <nav
+        aria-label="页面导航"><a href="#results">比较结果</a><a href="#method">方法与边界</a><a href="#downloads">数据下载 <span aria-hidden="true">↗</span></a></nav>
+    </header>
+    <main id="main">
+      <section class="hero page-width" aria-labelledby="hero-title">
+        <div
+          class="eyebrow"><span class="status-dot" aria-hidden="true"></span> 公开数据 · 可检查的测量 · 五组比较</div>
+        <div class="hero-grid">
+          <h1
+            id="hero-title">相似，<br />可以看得<span class="hero-emphasis">更具体。</span></h1>
+          <div
+            class="hero-aside"><span class="figure-label">A STUDY IN PROPORTION</span><p>两张面孔之间，<br />哪些距离与比例接近？</p><p class="hero-description">FaceTwin 用 13 项投影二维比例比较 WFLW 测试集中的面部几何。本页展示本次排序的前五组，并把分数背后的测量一起展开。</p><a class="text-link" href="#results">查看五组比较 <span aria-hidden="true">↓</span></a></div>
+        </div>
+        <div
+          class="hero-note"><span class="note-mark" aria-hidden="true">※</span><p>这里的分数是<strong>未经校准的几何比较分数</strong>，不是人类感知的相似概率，也不用于身份识别。姿态、表情与图像质量都会影响结果。</p></div>
+        <div class="study-stats" id="study-stats" aria-label="研究规模">
+          <div><span class="stat-value">13</span><span class="stat-label">项二维比例</span></div>
+          <div><span class="stat-value">2,244</span><span class="stat-label">条有效人脸记录</span></div>
+          <div><span class="stat-value">2,516,646</span><span class="stat-label">组穷举比较</span></div>
+          <div><span class="stat-value">05</span><span class="stat-label">组最高分结果</span></div>
+        </div>
+      </section>
+      <section class="results-section page-width" id="results"
+        aria-labelledby="results-title">
+        <div class="section-heading">
+          <div><span class="eyebrow">THE FIVE CLOSEST PAIRS</span><h2 id="results-title">从接近的比例开始观察</h2></div>
+          <p>按本次调整后分数排序<br /><span>原始照片默认显示，测量线可在详情中开启。</span></p>
+        </div>
+        <div id="load-status" class="load-status"
+          role="status">正在读取比较数据…</div>
+        <div id="pair-list" class="pair-list"></div>
+      </section>
+      <section class="method-section" id="method"
+        aria-labelledby="method-title">
+        <div class="page-width">
+          <div class="section-heading">
+            <div><span class="eyebrow">HOW TO READ THIS STUDY</span><h2 id="method-title">分数之外，保留依据。</h2></div>
+            <p>测量提供线索。<br /><span>解释需要同时看图像、姿态和质量提醒。</span></p>
+          </div>
+          <div class="method-grid">
+            <article><span class="method-number">01 / INPUT</span><h3>同一测试集，完整比较</h3><p id="dataset-method">输入来自 WFLW 官方测试集。只有成功检测到单个人脸的图像参与两两比较；未检测到人脸与检测到多个人脸的图像排除在外。</p></article>
+            <article><span class="method-number">02 / MEASUREMENT</span><h3>13 项比例，不是身份特征</h3><p>以检测得到的面部关键点构成线段，再计算长度之比。它们描述照片中的二维投影；相同的立体面部也可能因拍摄角度和表情而得到不同结果。</p></article>
+            <article><span class="method-number">03 / INTERPRETATION</span><h3>读分数，也读限制</h3><p>所有 13 项测量均须有效。调整后分数仅根据嘴唇可靠性降低唇厚比例的权重，再将剩余权重归一化；原始分数保留作对照。保留权重指调整后剩余的原始权重总量。这些分数没有用人类相似判断做概率校准。</p></article>
+          </div>
+          <div class="limits-panel">
+            <div><span class="eyebrow">LIMITS & CAVEATS</span><h3>接近的数字，<br />不等于同一个结论。</h3></div>
+            <ul>
+              <li><strong>姿态与表情。</strong>二维投影会受转头、倾斜、张嘴、遮挡与镜头条件影响。</li>
+              <li><strong>关键点存在误差。</strong>检测或方向细化的误差会传递到距离、比例和最终分数。</li>
+              <li><strong>重复图像会抬高排名。</strong>第 2 组有疑似重复图像的提示，保留原排名并单独标记，不能把它当作独立面孔的相似证据。</li>
+              <li><strong>缺少感知校准。</strong>本次数据没有人类相似判断标签；分数仅描述给定图像的几何比较，不能解释为主观相似概率。</li>
+            </ul>
+          </div>
+          <div class="provenance">
+            <div><span class="eyebrow">PROVENANCE</span><h3>来源与版本</h3><p id="run-provenance">运行信息正在载入。</p><p class="rights-note">WFLW 数据集：Wu 等，<cite>Look at Boundary</cite>，CVPR 2018。照片权利归原权利人所有，原有水印予以保留；公开数据来源不等于已确认照片再发布许可。</p></div>
+            <ul id="sources-list" class="sources-list"></ul>
+          </div>
+        </div>
+      </section>
+      <section class="downloads-section page-width" id="downloads"
+        aria-labelledby="downloads-title">
+        <div><span class="eyebrow">TAKE A CLOSER LOOK</span><h2 id="downloads-title">把依据一起带走。</h2><p>从排序结果到每一项比例，保留可供检查的记录。</p></div>
+        <div
+          class="download-list"><a href="./assets/downloads/top5.csv" download><span>前五组结果 <small>CSV · 排名与分数</small></span><span aria-hidden="true">↗</span></a><a href="./assets/downloads/top5-feature-comparisons.csv" download><span>逐项测量比较 <small>CSV · 13 项比例</small></span><span aria-hidden="true">↗</span></a><a href="./assets/downloads/facetwin-wflw-top5.pdf" download><span>研究报告 <small>PDF · 图像与分析</small></span><span aria-hidden="true">↗</span></a><a href="./assets/downloads/verification.csv" download><span>数据核验记录 <small>CSV · 检查结果</small></span><span aria-hidden="true">↗</span></a></div>
+      </section>
+    </main>
+    <footer
+      class="footer page-width"><a class="wordmark" href="#">FaceTwin<span class="wordmark-dot" aria-hidden="true">·</span></a><p>看见接近之处，也看见测量的边界。</p><span>WFLW / 2026</span></footer>
+    <dialog id="pair-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-shell">
+        <header
+          class="dialog-header"><div><span class="eyebrow" id="dialog-kicker">PAIR DETAILS</span><h2 id="dialog-title">比较详情</h2></div><button class="close-button" type="button" aria-label="关闭比较详情">关闭 <span aria-hidden="true">×</span></button></header>
+        <div id="dialog-content"></div>
+      </div>
+    </dialog>
+  </body>
+</html>

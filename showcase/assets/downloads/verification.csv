@@ -1,0 +1,8 @@
+check,result,value
+complete_test_split,pass,2500
+all_input_source_asset_and_archive_hashes,pass,2118
+all_13_features_recalculated_from_selected_model_points,pass,3.552713678800501e-14
+independent_numpy_exhaustive_pair_count,pass,2516646
+independent_numpy_top5_order_and_scores,pass,1.4210854715202004e-14
+saved_all_pair_csv_row_count,pass,2516646
+audit_wall_seconds,complete,5.995580541006348

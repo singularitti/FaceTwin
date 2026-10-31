@@ -4,6 +4,10 @@ A local, multi-image facial resemblance explorer with visible geometric measurem
 
 FaceTwin 0.1 compares two sets of portrait photos, draws face landmarks and a mesh, and explains a **geometric resemblance score** through 13 measured proportions. The interface is in Chinese. It is an exploratory geometry baseline, not a validated model of human-perceived resemblance, an identity verification service, or a PerFace reproduction.
 
+## WFLW results showcase
+
+The independent [WFLW showcase](showcase/README.md) presents the five highest-scoring pairs from a completed evaluation of all 2,500 official test records. It includes public dataset crops, actual measurement overlays, quality warnings, the suspected duplicate-image finding, and PDF/CSV evidence. GitHub Pages publishes only `showcase/`; this local comparison application remains separate. The showcase is a record of the current geometry baseline, not a validated human-resemblance benchmark.
+
 ## Run locally
 
 Requirements: [uv](https://docs.astral.sh/uv/) and a modern desktop browser with WebAssembly, Workers, `createImageBitmap`, and `OffscreenCanvas`. Start with a recent Chrome or Edge. The project selects Python 3.14 through `.python-version`; the scripts support Python 3.10+. `uv sync` installs Pillow and pillow-heif for local HEIF decoding. No npm installation, account, API key, or GPU is required.
